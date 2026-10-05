@@ -1,12 +1,18 @@
 package uk.org.retallack.slimbook
 
 import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.util.Log
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.view.View
 import android.webkit.*
 import android.widget.TextView
@@ -14,6 +20,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import androidx.work.*
@@ -40,6 +47,8 @@ class MainActivity : AppCompatActivity() {
             "download messenger", "mobile browsers", "use the messenger app",
             "open in the messenger", "blocked", "unavailable",
         )
+        private const val IMAGE_SAVE_CHANNEL_ID = "image_saves"
+        private const val IMAGE_SAVE_NOTIF_ID = 2000
     }
 
     private lateinit var webView: WebView
@@ -51,9 +60,13 @@ class MainActivity : AppCompatActivity() {
     private var filterJs: String = ""
     private var highlightMode = false
     private var isMessengerMode = false
-    private var isComposerFocused = false
     private var messengerRedirectPending = false
     private val logMessages = mutableListOf<String>()
+    // Issue #10: our enqueued image downloads, completed by our own
+    // notification (DownloadManager's stock tap can't resolve files saved
+    // into Pictures/SlimBook/ on Android 10+).
+    private val pendingDownloads = mutableMapOf<Long, String>()
+    private var downloadReceiver: BroadcastReceiver? = null
     private var fileUploadCallback: android.webkit.ValueCallback<Array<android.net.Uri>>? = null
     private val filePickerLauncher = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
@@ -90,6 +103,8 @@ class MainActivity : AppCompatActivity() {
         setupStatsBadge()
         requestNotificationPermission()
         NotificationService.createChannel(this)
+        createImageSaveChannel()
+        registerDownloadReceiver()
         authorDb.setLastNotifCount(0) // Clear stale count on open
         (getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager).cancel(NotificationService.NOTIFICATION_ID)
         scheduleNotificationWorker()
@@ -145,9 +160,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyFeedMode() {
         if (::swipeRefresh.isInitialized) swipeRefresh.isEnabled = true
-        if (::statsBadge.isInitialized) {
-            updateBadgeVisibility()
-        }
+        if (::statsBadge.isInitialized) statsBadge.visibility = View.VISIBLE
         if (::webView.isInitialized) {
             webView.settings.useWideViewPort = false
             webView.settings.loadWithOverviewMode = false
@@ -251,9 +264,15 @@ class MainActivity : AppCompatActivity() {
                 // Only cache, don't post notification from foreground
                 Log.d("SlimBook", "Notification count from page: $count")
             },
-            onComposerFocused = { focused ->
-                runOnUiThread { setComposerFocused(focused) }
+            onSaveImageUrl = { url ->
+                runOnUiThread { if (claimSaveSlot()) downloadHttpUrl(url, null, null, null) }
             },
+            onSaveFailed = { reason ->
+                runOnUiThread {
+                    Log.d("SlimBook", "Save failed: $reason")
+                    Toast.makeText(this, "Could not save image", Toast.LENGTH_SHORT).show()
+                }
+            }
         ), "Android")
 
         webView.webViewClient = object : WebViewClient() {
@@ -381,6 +400,7 @@ class MainActivity : AppCompatActivity() {
                     applyMessengerMode()
                     swipeRefresh.isRefreshing = false
                     applyMessengerTweaks(view, url)
+                    injectSaveClickHook()
                     return
                 }
                 // A settling Facebook page finishing after a messenger redirect
@@ -400,6 +420,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 swipeRefresh.isRefreshing = false
                 injectFilter()
+                injectSaveClickHook()
             }
         }
 
@@ -433,6 +454,253 @@ class MainActivity : AppCompatActivity() {
                 return true
             }
         }
+
+        // Issue #10: the FB photo viewer "Save Image" fires a download that
+        // was silently dropped (no DownloadListener). Direct http(s) files
+        // go via DownloadManager; viewer-generated blob:/data: URLs are
+        // resolved in-page WITHOUT fetch/XHR (FB's CSP blocks connect-src
+        // for blob:) — canvas snapshot first, https-src fallback second.
+        webView.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
+            Log.d("SlimBook", "DOWNLOAD:$mimeType $url")
+            if (url.startsWith("blob:") || url.startsWith("data:")) {
+                downloadBlobUrl(url)
+            } else {
+                downloadHttpUrl(url, userAgent, contentDisposition, mimeType)
+            }
+        }
+
+    }
+
+    private fun injectSaveClickHook() {
+        // Issue #10 speed: FB takes seconds to prepare the blob download
+        // after the tap. Catch the Save/Download click itself (capture phase)
+        // and start the native download immediately from the on-screen
+        // photo's https URL. Guarded to viewer-sized images so feed buttons
+        // like "Save post" never trigger it. The DownloadListener below stays
+        // as a safety net; the shared save-slot debounce keeps one tap to
+        // one download.
+        webView.evaluateJavascript(
+            """(function(){
+                if(window.__sb_save_hook)return;window.__sb_save_hook=true;
+                function largestSrc(){
+                    var imgs=document.querySelectorAll('img');
+                    var best='',bestArea=0;
+                    for(var i=0;i<imgs.length;i++){
+                        var r=imgs[i].getBoundingClientRect();
+                        if(r.width<100||r.bottom<0||r.top>window.innerHeight)continue;
+                        var area=r.width*r.height;
+                        var src=imgs[i].currentSrc||imgs[i].src||'';
+                        if(area>bestArea&&src.indexOf('http')===0){bestArea=area;best=src;}
+                    }
+                    if(bestArea<window.innerWidth*window.innerHeight*0.25)best='';
+                    return best;
+                }
+                document.addEventListener('click',function(e){
+                    var el=e.target;var t='';
+                    if(el){
+                        if(el.getAttribute)t=(el.innerText||'')+' '+(el.getAttribute('aria-label')||'');
+                        t=t.toLowerCase();
+                    }
+                    if(t.indexOf('save')!==-1||t.indexOf('download')!==-1){
+                        var src=largestSrc();
+                        if(src){console.log('SLIMBOOK_SAVE:click-hook');try{Android.saveImageUrl(src);}catch(err){}}
+                    }
+                },true);
+            })();""",
+            null
+        )
+    }
+
+    // One Save tap fans out into a click-hook save plus many blob DOWNLOAD
+    // events; the shared slot keeps one tap to one download + one toast.
+    private var lastSaveMs: Long = 0
+
+    private fun claimSaveSlot(): Boolean {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastSaveMs < 2500) return false
+        lastSaveMs = now
+        return true
+    }
+
+    private fun downloadBlobUrl(url: String) {
+        if (!claimSaveSlot()) {
+            Log.d("SlimBook", "DOWNLOAD:debounced $url")
+            return
+        }
+        // Fast path (issue #10): FB images always taint the canvas
+        // (verified on-device), so skip snapshot/encode entirely and hand
+        // the on-screen photo's https URL to the native downloader.
+        // Viewport-filtered scan: no layout thrash on off-screen feed imgs.
+        webView.evaluateJavascript(
+            """(function(){
+                var imgs=document.querySelectorAll('img');
+                var best='',bestArea=0;
+                for(var i=0;i<imgs.length;i++){
+                    var r=imgs[i].getBoundingClientRect();
+                    if(r.width<100||r.bottom<0||r.top>window.innerHeight)continue;
+                    var area=r.width*r.height;
+                    var src=imgs[i].currentSrc||imgs[i].src||'';
+                    if(area>bestArea&&src.indexOf('http')===0){bestArea=area;best=src;}
+                }
+                if(!best){console.log('SLIMBOOK_SAVE:no-img');try{Android.saveImageFailed('no image found');}catch(e){}return;}
+                try{Android.saveImageUrl(best);}catch(e){console.log('SLIMBOOK_SAVE:bridge-failed:'+e);}
+            })();""",
+            null
+        )
+    }
+
+    private fun downloadHttpUrl(
+        url: String,
+        userAgent: String?,
+        contentDisposition: String?,
+        mimeType: String?
+    ) {
+        try {
+            var fileName = android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType)
+            if (!fileName.contains('.')) fileName += ".jpg"
+            val request = android.app.DownloadManager.Request(android.net.Uri.parse(url)).apply {
+                setMimeType(mimeType)
+                addRequestHeader("Cookie", CookieManager.getInstance().getCookie(url) ?: "")
+                addRequestHeader("User-Agent", userAgent ?: webView.settings.userAgentString)
+                setTitle(fileName)
+                setDescription("Saving image")
+                // Progress only: DownloadManager's own completion tap cannot
+                // resolve files inside Pictures/SlimBook/ (issue #10), so we
+                // post our own completion notification with a MediaStore URI.
+                setNotificationVisibility(
+                    android.app.DownloadManager.Request.VISIBILITY_VISIBLE
+                )
+                setDestinationInExternalPublicDir(
+                    android.os.Environment.DIRECTORY_PICTURES, "SlimBook/$fileName"
+                )
+            }
+            val dm = getSystemService(DOWNLOAD_SERVICE) as android.app.DownloadManager
+            pendingDownloads[dm.enqueue(request)] = fileName
+            Toast.makeText(this, "Downloading image…", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Log.e("SlimBook", "Download failed: $url", e)
+            Toast.makeText(this, "Could not save image", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun createImageSaveChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val channel = NotificationChannel(
+            IMAGE_SAVE_CHANNEL_ID, "Saved images",
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply { description = "Image download complete" }
+        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+            .createNotificationChannel(channel)
+    }
+
+    private fun registerDownloadReceiver() {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                val id = intent?.getLongExtra(
+                    android.app.DownloadManager.EXTRA_DOWNLOAD_ID, -1
+                ) ?: return
+                val fileName = pendingDownloads.remove(id) ?: return
+                val dm = getSystemService(DOWNLOAD_SERVICE)
+                    as android.app.DownloadManager
+                dm.query(
+                    android.app.DownloadManager.Query().setFilterById(id)
+                )?.use { c ->
+                    if (!c.moveToFirst()) return
+                    val status = c.getInt(c.getColumnIndexOrThrow(
+                        android.app.DownloadManager.COLUMN_STATUS
+                    ))
+                    if (status == android.app.DownloadManager.STATUS_SUCCESSFUL) {
+                        onImageDownloadComplete(fileName)
+                    } else {
+                        val reason = c.getInt(c.getColumnIndexOrThrow(
+                            android.app.DownloadManager.COLUMN_REASON
+                        ))
+                        Log.d("SlimBook", "Download failed: $fileName status=$status reason=$reason")
+                        Toast.makeText(
+                            this@MainActivity, "Download failed", Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+            }
+        }
+        downloadReceiver = receiver
+        val filter = IntentFilter(android.app.DownloadManager.ACTION_DOWNLOAD_COMPLETE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(receiver, filter)
+        }
+    }
+
+    private fun onImageDownloadComplete(fileName: String) {
+        Log.d("SlimBook", "Image download complete: $fileName")
+        val uri = resolveSavedImageUri(fileName)
+        val viewIntent = if (uri != null) {
+            Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "image/*")
+                flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+            }
+        } else {
+            // MediaStore lookup missed: fall back to opening the app.
+            Intent(this, MainActivity::class.java)
+        }
+        val pi = PendingIntent.getActivity(
+            this, fileName.hashCode(), viewIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = NotificationCompat.Builder(this, IMAGE_SAVE_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_menu_gallery)
+            .setContentTitle("Image saved")
+            .setContentText("Pictures/SlimBook/$fileName")
+            .setContentIntent(pi)
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+            .notify(IMAGE_SAVE_NOTIF_ID + (fileName.hashCode() and 0xFF), notification)
+        Toast.makeText(this, "Image saved to Pictures/SlimBook", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun resolveSavedImageUri(fileName: String): Uri? {
+        return try {
+            val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                android.provider.MediaStore.Images.Media.getContentUri(
+                    android.provider.MediaStore.VOLUME_EXTERNAL
+                )
+            } else {
+                android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            }
+            val (selection, args) = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                "${android.provider.MediaStore.Images.Media.DISPLAY_NAME}=? AND " +
+                    "${android.provider.MediaStore.Images.Media.RELATIVE_PATH}=?" to
+                    arrayOf(fileName, "Pictures/SlimBook/")
+            } else {
+                @Suppress("DEPRECATION")
+                "${android.provider.MediaStore.Images.Media.DATA} LIKE ?" to
+                    arrayOf("%/Pictures/SlimBook/$fileName")
+            }
+            contentResolver.query(
+                collection,
+                arrayOf(android.provider.MediaStore.Images.Media._ID),
+                selection, args,
+                "${android.provider.MediaStore.Images.Media.DATE_ADDED} DESC"
+            )?.use { c ->
+                if (c.moveToFirst()) {
+                    val id = c.getLong(0)
+                    Uri.withAppendedPath(collection, id.toString())
+                } else null
+            }
+        } catch (e: Exception) {
+            Log.e("SlimBook", "resolveSavedImageUri failed: $fileName", e)
+            null
+        }
+    }
+
+    override fun onDestroy() {
+        downloadReceiver?.let { unregisterReceiver(it) }
+        downloadReceiver = null
+        super.onDestroy()
     }
 
     private fun setupSwipeRefresh() {
@@ -444,28 +712,6 @@ class MainActivity : AppCompatActivity() {
         statsBadge.setOnLongClickListener {
             showDebugMenu()
             true
-        }
-    }
-
-    /**
-     * Semantic hide: the page reports comment/chat composer focus via
-     * SlimBookBridge.setComposerFocused (focusin/focusout on
-     * input/textarea/contenteditable). More reliable than IME geometry,
-     * which WebView often swallows before it reaches our window.
-     */
-    private fun setComposerFocused(focused: Boolean) {
-        if (focused == isComposerFocused) return
-        isComposerFocused = focused
-        Log.d("SlimBook", "COMPOSER focused=$focused")
-        updateBadgeVisibility()
-    }
-
-    private fun updateBadgeVisibility() {
-        if (!::statsBadge.isInitialized) return
-        statsBadge.visibility = when {
-            isComposerFocused -> View.GONE
-            isMessengerMode -> View.GONE
-            else -> View.VISIBLE
         }
     }
 
@@ -655,31 +901,6 @@ class MainActivity : AppCompatActivity() {
         if (filterJs.isNotEmpty()) {
             webView.evaluateJavascript(filterJs, null)
         }
-        // Composer-focus reporter: drives badge auto-hide semantically.
-        // Separate from filter.js so it also applies when a remote filter
-        // is cached. focusout is debounced: moving between two inputs
-        // fires focusout+focusin back-to-back and must not flicker.
-        webView.evaluateJavascript("""
-            (function() {
-                if (window.__sb_composer_hooked) return;
-                window.__sb_composer_hooked = true;
-                function isEditable(el) {
-                    return !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
-                }
-                document.addEventListener('focusin', function(e) {
-                    if (isEditable(e.target) && typeof Android !== 'undefined' && Android.setComposerFocused) {
-                        Android.setComposerFocused(true);
-                    }
-                });
-                document.addEventListener('focusout', function() {
-                    setTimeout(function() {
-                        if (!isEditable(document.activeElement) && typeof Android !== 'undefined' && Android.setComposerFocused) {
-                            Android.setComposerFocused(false);
-                        }
-                    }, 150);
-                });
-            })();
-        """.trimIndent(), null)
         // Inject tracking logger to intercept WebSocket, sendBeacon, and XHR
         webView.evaluateJavascript("""
             (function() {
