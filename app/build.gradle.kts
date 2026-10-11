@@ -17,10 +17,17 @@ android {
 
     signingConfigs {
         create("release") {
-            storeFile = file(System.getProperty("user.home") + "/.android/keystores/slimbook-release.jks")
-            storePassword = System.getenv("SLIMBOOK_KEYSTORE_PASSWORD") ?: ""
-            keyAlias = "slimbook"
-            keyPassword = System.getenv("SLIMBOOK_KEY_PASSWORD") ?: ""
+            val keystoreFile = if (System.getenv("KEYSTORE_PATH") != null) {
+                file(System.getenv("KEYSTORE_PATH"))
+            } else if (System.getenv("SLIMBOOK_KEYSTORE_PATH") != null) {
+                file(System.getenv("SLIMBOOK_KEYSTORE_PATH"))
+            } else {
+                file(System.getProperty("user.home") + "/.android/keystores/slimbook-release.jks")
+            }
+            storeFile = keystoreFile
+            storePassword = System.getenv("KEYSTORE_PASSWORD") ?: System.getenv("SLIMBOOK_KEYSTORE_PASSWORD") ?: "slimbook-release"
+            keyAlias = System.getenv("KEY_ALIAS") ?: "slimbook"
+            keyPassword = System.getenv("KEY_PASSWORD") ?: System.getenv("SLIMBOOK_KEY_PASSWORD") ?: "slimbook-release"
         }
     }
 
@@ -44,12 +51,20 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    buildFeatures {
+        viewBinding = true
+    }
 }
 
 dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
+    implementation("com.google.android.material:material:1.11.0")
+    implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
-    implementation("androidx.webkit:webkit:1.9.0")
     implementation("androidx.work:work-runtime-ktx:2.9.0")
+    testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test.ext:junit:1.1.5")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
 }
