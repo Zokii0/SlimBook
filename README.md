@@ -144,17 +144,13 @@ SlimBook is designed to be published via GitHub Releases and F-Droid. To release
 
 1. **Update version code and version name** in `app/build.gradle.kts` (increment `versionCode`, update `versionName`).
 2. **Commit and push** changes to `main`.
-3. **Build the Release APK locally (signed):**
-   ```bash
-   SLIMBOOK_KEYSTORE_PASSWORD="slimbook-release" SLIMBOOK_KEY_PASSWORD="slimbook-release" ./gradlew assembleRelease
-   ```
-   The signed APK will be generated at `app/build/outputs/apk/release/app-release.apk`.
-4. **Create a GitHub Release / Tag:**
+3. **Create a GitHub Release / Tag:**
    - Go to your repository on GitHub → **Releases** → **Draft a new release**.
-   - Create a new tag matching the version (e.g., `v1.1.0`).
-   - Upload the built `app-release.apk` as a release asset.
+   - Create a new tag matching the version (e.g., `v1.2.0`).
    - Write release notes detailing bug fixes and improvements.
    - Publish the release.
+   - *GitHub Actions will automatically build, sign using repository keystore secrets, and attach `app-release.apk` to the release.*
+
 5. **F-Droid Metadata Update (`fdroiddata`):**
    Since SlimBook uses prebuilt binaries (`Binaries:`), each new release requires updating the F-Droid metadata repository (`fdroiddata`).
    - **Update local `fdroiddata` repository from upstream:**
