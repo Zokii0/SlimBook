@@ -147,11 +147,9 @@ SlimBook is designed to be published via GitHub Releases and F-Droid. To release
 3. **Create a GitHub Release / Tag:**
    - Go to your repository on GitHub → **Releases** → **Draft a new release**.
    - Create a new tag matching the version (e.g., `v1.2.0`).
-   - Write release notes detailing bug fixes and improvements.
-   - Publish the release.
-   - *GitHub Actions will automatically build, sign using repository keystore secrets, and attach `app-release.apk` to the release.*
-
-5. **F-Droid Metadata Update (`fdroiddata`):**
+   - Write release notes and publish the release.
+   - *GitHub Actions will automatically build, sign using repository keystore secrets (`KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`), and attach `app-release.apk` to the release.*
+4. **F-Droid Metadata Update (`fdroiddata`):**
    Since SlimBook uses prebuilt binaries (`Binaries:`), each new release requires updating the F-Droid metadata repository (`fdroiddata`).
    - **Update local `fdroiddata` repository from upstream:**
      ```bash
@@ -162,36 +160,19 @@ SlimBook is designed to be published via GitHub Releases and F-Droid. To release
      ```
    - **Create a working branch:**
      ```bash
-     git checkout -b update-slimbook-v1.1.0
+     git checkout -b update-slimbook-v1.2.0
      ```
    - **Edit metadata file (`metadata/uk.org.retallack.slimbook.yml`):**
-     Add the new version entry under `Builds:` and update `CurrentVersion` / `CurrentVersionCode`. Note the exact YAML format (versionName must be a quoted string like `'1.0'`, but unquoted for newer versions or per `rewritemeta` requirements):
-     ```yaml
-     Builds:
-       - versionName: '1.0'
-         versionCode: 1
-         commit: 31fa0f2cfde931c5694248178c3d6dd5ee3c5cb8
-         subdir: app
-         gradle:
-           - yes
-
-       - versionName: 1.1.0
-         versionCode: 2
-         commit: <git_commit_hash_of_release_tag>
-         subdir: app
-         gradle:
-           - yes
-
-     AutoUpdateMode: Version
-     UpdateCheckMode: Tags
-     CurrentVersion: 1.1.0
-     CurrentVersionCode: 2
+     Add the new version entry under `Builds:` with its corresponding release tag commit hash, and update `CurrentVersion` / `CurrentVersionCode`.
+   - **Run F-Droid linter / rewritemeta:**
+     ```bash
+     fdroid rewritemeta metadata/uk.org.retallack.slimbook.yml
      ```
    - **Commit and push:**
      ```bash
      git add metadata/uk.org.retallack.slimbook.yml
-     git commit -m "Update SlimBook to 1.1.0"
-     git push -u origin update-slimbook-v1.1.0
+     git commit -m "SlimBook: update to v1.2.0"
+     git push -u origin update-slimbook-v1.2.0
      ```
    - Open a Merge Request on GitLab against `fdroid/fdroiddata`.
 
