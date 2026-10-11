@@ -1,0 +1,3 @@
+• Auto-hide stats badge when typing in comment boxes or composers
+• Fix Save Image in photo viewer (saves directly to Pictures/SlimBook/ with completion notification)
+• GitHub Actions CI workflow integration for build, lint, and unit tests
