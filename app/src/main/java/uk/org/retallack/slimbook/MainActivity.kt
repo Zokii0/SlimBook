@@ -60,6 +60,7 @@ class MainActivity : AppCompatActivity() {
     private var filterJs: String = ""
     private var highlightMode = false
     private var isMessengerMode = false
+    private var isComposerFocused = false
     private var messengerRedirectPending = false
     private val logMessages = mutableListOf<String>()
     // Issue #10: our enqueued image downloads, completed by our own
@@ -160,7 +161,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyFeedMode() {
         if (::swipeRefresh.isInitialized) swipeRefresh.isEnabled = true
-        if (::statsBadge.isInitialized) statsBadge.visibility = View.VISIBLE
+        if (::statsBadge.isInitialized) {
+            updateBadgeVisibility()
+        }
         if (::webView.isInitialized) {
             webView.settings.useWideViewPort = false
             webView.settings.loadWithOverviewMode = false
@@ -260,6 +263,9 @@ class MainActivity : AppCompatActivity() {
 
         webView.addJavascriptInterface(SlimBookBridge(
             authorDb,
+            onComposerFocused = { focused ->
+                runOnUiThread { setComposerFocused(focused) }
+            },
             onNotifCount = { count ->
                 // Only cache, don't post notification from foreground
                 Log.d("SlimBook", "Notification count from page: $count")
@@ -703,6 +709,22 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    private fun setComposerFocused(focused: Boolean) {
+        if (focused == isComposerFocused) return
+        isComposerFocused = focused
+        Log.d("SlimBook", "COMPOSER focused=")
+        updateBadgeVisibility()
+    }
+
+    private fun updateBadgeVisibility() {
+        if (!::statsBadge.isInitialized) return
+        statsBadge.visibility = when {
+            isComposerFocused -> View.GONE
+            isMessengerMode -> View.GONE
+            else -> View.VISIBLE
+        }
+    }
+
     private fun setupSwipeRefresh() {
         swipeRefresh.setOnRefreshListener { webView.reload() }
     }
@@ -901,6 +923,38 @@ class MainActivity : AppCompatActivity() {
         if (filterJs.isNotEmpty()) {
             webView.evaluateJavascript(filterJs, null)
         }
+        webView.evaluateJavascript("""
+            (function() {
+                if (window.__sb_composer_hooked) return;
+                window.__sb_composer_hooked = true;
+                function isEditable(el) {
+                    if (!el) return false;
+                    var tag = el.tagName;
+                    if (tag === 'INPUT' || tag === 'TEXTAREA') return true;
+                    if (el.isContentEditable || el.getAttribute('contenteditable') === 'true') return true;
+                    if (el.getAttribute('role') === 'textbox') return true;
+                    return false;
+                }
+                document.addEventListener('focusin', function(e) {
+                    if (isEditable(e.target)) {
+                        console.log('SLIMBOOK_FOCUS:in:' + (e.target.tagName || e.target.nodeName));
+                        if (typeof Android !== 'undefined' && Android.setComposerFocused) {
+                            Android.setComposerFocused(true);
+                        }
+                    }
+                }, true);
+                document.addEventListener('focusout', function(e) {
+                    setTimeout(function() {
+                        if (!isEditable(document.activeElement) && document.activeElement.tagName !== 'BODY') {
+                            console.log('SLIMBOOK_FOCUS:out');
+                            if (typeof Android !== 'undefined' && Android.setComposerFocused) {
+                                Android.setComposerFocused(false);
+                            }
+                        }
+                    }, 150);
+                }, true);
+            })();
+        """.trimIndent(), null)
         // Inject tracking logger to intercept WebSocket, sendBeacon, and XHR
         webView.evaluateJavascript("""
             (function() {

@@ -6,6 +6,7 @@ import android.webkit.JavascriptInterface
 class SlimBookBridge(
     private val db: AuthorDatabase,
     private val onNotifCount: (Int) -> Unit,
+    private val onComposerFocused: (Boolean) -> Unit = {},
     private val onSaveImageUrl: (String) -> Unit = {},
     private val onSaveFailed: (String) -> Unit = {}
 ) {
@@ -34,6 +35,11 @@ class SlimBookBridge(
     fun reportNotifCount(count: String) {
         val n = count.replace("+", "").toIntOrNull() ?: 0
         onNotifCount(n)
+    }
+
+    @JavascriptInterface
+    fun setComposerFocused(focused: Boolean) {
+        onComposerFocused(focused)
     }
 
     /**
