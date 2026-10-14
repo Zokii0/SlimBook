@@ -20,7 +20,8 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|end"
-        android:layout_margin="12dp"
+        android:layout_marginEnd="12dp"
+        android:layout_marginBottom="84dp"
         android:background="#CC000000"
         android:focusable="false"
         android:focusableInTouchMode="false"
@@ -29,5 +30,22 @@
         android:textSize="11sp"
         android:visibility="gone"
         android:text="🛡 0" />
+
+    <!-- Persistent Messenger shortcut (issue #14): always reachable, no need
+         to scroll back to the top of the feed. Draggable, can be hidden from
+         the debug menu. -->
+    <ImageView
+        android:id="@+id/messengerButton"
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:layout_gravity="bottom|end"
+        android:layout_marginEnd="12dp"
+        android:layout_marginBottom="136dp"
+        android:background="@drawable/bg_messenger_button"
+        android:contentDescription="Open Messenger"
+        android:elevation="6dp"
+        android:padding="10dp"
+        android:src="@drawable/ic_messenger"
+        android:visibility="gone" />
 
 </FrameLayout>
