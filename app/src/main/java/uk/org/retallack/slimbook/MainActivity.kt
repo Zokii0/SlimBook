@@ -17,6 +17,10 @@ import android.view.View
 import android.webkit.*
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -47,6 +51,26 @@ class MainActivity : AppCompatActivity() {
             "download messenger", "mobile browsers", "use the messenger app",
             "open in the messenger", "blocked", "unavailable",
         )
+        // Clicks Facebook's own in-page back arrow (the control that always
+        // worked). Matches the aria-label in common UI languages first; as a
+        // last resort an icon-only button in the very top-left corner.
+        private const val PAGE_BACK_JS = """(function(){
+            var re=/^(back|go back|назад|nazad|zurück|atrás|retour|indietro|voltar|geri|wstecz|zpět|înapoi|vissza|tillbaka|terug|tilbage|takaisin|nazad)$/i;
+            var els=document.querySelectorAll('[aria-label]');
+            for(var i=0;i<els.length;i++){
+                var l=(els[i].getAttribute('aria-label')||'').trim();
+                if(re.test(l)){els[i].click();return true;}
+            }
+            var c=document.querySelectorAll('a,button,[role="button"]');
+            for(var j=0;j<c.length;j++){
+                var r=c[j].getBoundingClientRect();
+                if(r.top>=0&&r.top<100&&r.left>=0&&r.left<100&&r.width>=20&&r.width<=90&&r.height>=20&&r.height<=90
+                   &&(c[j].textContent||'').trim()===''&&c[j].querySelector('svg,img,i')){
+                    c[j].click();return true;
+                }
+            }
+            return false;
+        })()"""
         private const val IMAGE_SAVE_CHANNEL_ID = "image_saves"
         private const val IMAGE_SAVE_NOTIF_ID = 2000
     }
@@ -54,10 +78,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private lateinit var swipeRefresh: SwipeRefreshLayout
     private lateinit var statsBadge: TextView
+    private lateinit var messengerButton: View
+    private lateinit var messengerBadge: TextView
     private lateinit var filterManager: FilterManager
     private lateinit var authorDb: AuthorDatabase
 
     private var filterJs: String = ""
+    private var layoutFixJs: String = ""
+    private var unreadWatchJs: String = ""
     private var highlightMode = false
     private var isMessengerMode = false
     private var isComposerFocused = false
@@ -95,13 +123,18 @@ class MainActivity : AppCompatActivity() {
         webView = findViewById(R.id.webView)
         swipeRefresh = findViewById(R.id.swipeRefresh)
         statsBadge = findViewById(R.id.statsBadge)
+        messengerButton = findViewById(R.id.messengerButton)
+        messengerBadge = findViewById(R.id.messengerBadge)
         filterManager = FilterManager(this)
         authorDb = AuthorDatabase(this)
 
+        setupSystemBars()
         setupCookies()
         setupWebView()
         setupSwipeRefresh()
         setupStatsBadge()
+        setupMessengerButton()
+        setupBackHandling()
         requestNotificationPermission()
         NotificationService.createChannel(this)
         createImageSaveChannel()
@@ -111,7 +144,11 @@ class MainActivity : AppCompatActivity() {
         scheduleNotificationWorker()
         if (savedInstanceState != null) {
             webView.restoreState(savedInstanceState)
-            CoroutineScope(Dispatchers.IO).launch { filterJs = filterManager.getFilterJs() }
+            CoroutineScope(Dispatchers.IO).launch {
+                filterJs = filterManager.getFilterJs()
+                layoutFixJs = loadAsset("layout_fix.js")
+                unreadWatchJs = loadAsset("unread_watch.js")
+            }
         } else {
             loadFilter()
         }
@@ -178,7 +215,7 @@ class MainActivity : AppCompatActivity() {
      */
     private fun applyMessengerMode() {
         if (::swipeRefresh.isInitialized) swipeRefresh.isEnabled = false
-        if (::statsBadge.isInitialized) statsBadge.visibility = View.GONE
+        updateBadgeVisibility() // hides badge + Messenger button in chat
         if (::webView.isInitialized) {
             webView.settings.useWideViewPort = true
             webView.settings.loadWithOverviewMode = true
@@ -266,6 +303,9 @@ class MainActivity : AppCompatActivity() {
             onComposerFocused = { focused ->
                 runOnUiThread { setComposerFocused(focused) }
             },
+            onMessageCount = { count ->
+                runOnUiThread { updateMessengerBadge(count) }
+            },
             onNotifCount = { count ->
                 // Only cache, don't post notification from foreground
                 Log.d("SlimBook", "Notification count from page: $count")
@@ -284,6 +324,9 @@ class MainActivity : AppCompatActivity() {
         webView.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
                 super.onPageStarted(view, url, favicon)
+                // A new page has no focused field; a blur lost during the
+                // navigation must not leave the overlays hidden.
+                setComposerFocused(false)
                 // Don't touch chat pages: they are WebSocket-heavy and replacing
                 // WebSocket.prototype breaks their transport (issue #2 cut-off).
                 if (isChatUrl(url)) return
@@ -357,7 +400,7 @@ class MainActivity : AppCompatActivity() {
                     return true
                 }
                 // Redirect fb-messenger:// and messages URLs to the desktop
-                // chat stack (like SlimSocial).
+                // chat stack.
                 if (scheme == "fb-messenger" || scheme == "fb" || isMessagesUrl(url)) {
                     redirectToMessenger(view)
                     return true
@@ -723,6 +766,14 @@ class MainActivity : AppCompatActivity() {
             isMessengerMode -> View.GONE
             else -> View.VISIBLE
         }
+        if (::messengerButton.isInitialized) {
+            messengerButton.visibility = when {
+                !authorDb.isMessengerButtonEnabled() -> View.GONE
+                isComposerFocused -> View.GONE
+                isMessengerMode -> View.GONE
+                else -> View.VISIBLE
+            }
+        }
     }
 
     private fun setupSwipeRefresh() {
@@ -735,11 +786,85 @@ class MainActivity : AppCompatActivity() {
             showDebugMenu()
             true
         }
+        // Issue #9: the badge used to sit on top of the comment composer
+        // icons (GIF / emoji). Let the user drag it out of the way.
+        DragHelper.attach(statsBadge, authorDb.getOverlayOffset("badge")) { dx, dy ->
+            authorDb.setOverlayOffset("badge", dx, dy)
+        }
+    }
+
+    /**
+     * Issue #14: persistent Messenger shortcut. The web "Messenger" icon only
+     * exists in the header at the very top of the feed, so reaching it from a
+     * long feed or a comment thread meant scrolling all the way up. This
+     * native button is always on screen in feed mode and uses the same
+     * desktop-UA redirect as the in-page Messages tab.
+     */
+    private fun setupMessengerButton() {
+        messengerButton.visibility =
+            if (authorDb.isMessengerButtonEnabled()) View.VISIBLE else View.GONE
+        messengerButton.setOnClickListener { redirectToMessenger(webView) }
+        DragHelper.attach(messengerButton, authorDb.getOverlayOffset("messenger")) { dx, dy ->
+            authorDb.setOverlayOffset("messenger", dx, dy)
+        }
+    }
+
+    private fun loadAsset(name: String): String = try {
+        assets.open(name).bufferedReader().use { it.readText() }
+    } catch (e: Exception) {
+        Log.e("SlimBook", "$name missing", e)
+        ""
+    }
+
+    /**
+     * The status bar is transparent and the window is light, so the system
+     * icons must be dark; with the default (light) icons they were white on
+     * white and invisible. On Android 15+ (targetSdk 35) the app also draws
+     * edge-to-edge, so the content is padded by the system bar insets instead
+     * of sitting under the status/navigation bars.
+     */
+    private fun setupSystemBars() {
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = true
+            isAppearanceLightNavigationBars = true
+        }
+        var imeWasVisible = false
+        ViewCompat.setOnApplyWindowInsetsListener(findViewById<View>(android.R.id.content)) { v, insets ->
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+            // Edge-to-edge no longer resizes the window for the keyboard, so
+            // make room for it ourselves (only where that applies).
+            val bottom = if (Build.VERSION.SDK_INT >= 35) maxOf(bars.bottom, ime.bottom) else bars.bottom
+            v.setPadding(bars.left, bars.top, bars.right, bottom)
+
+            // The keyboard going away means nothing is being typed any more,
+            // even if the page never reported a blur (pressing Back hides the
+            // keyboard without blurring the field) - otherwise the overlays
+            // stay hidden.
+            val imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
+            if (imeWasVisible && !imeVisible) setComposerFocused(false)
+            imeWasVisible = imeVisible
+            WindowInsetsCompat.CONSUMED
+        }
+    }
+
+    private fun updateMessengerBadge(count: Int) {
+        if (!::messengerBadge.isInitialized) return
+        if (count <= 0) {
+            messengerBadge.visibility = View.GONE
+        } else {
+            messengerBadge.text = if (count > 99) "99+" else count.toString()
+            messengerBadge.visibility = View.VISIBLE
+        }
     }
 
     private fun loadFilter() {
         CoroutineScope(Dispatchers.IO).launch {
             filterJs = filterManager.getFilterJs()
+            layoutFixJs = loadAsset("layout_fix.js")
+            unreadWatchJs = loadAsset("unread_watch.js")
             withContext(Dispatchers.Main) {
                 webView.loadUrl(FB_URL)
             }
@@ -923,6 +1048,15 @@ class MainActivity : AppCompatActivity() {
         if (filterJs.isNotEmpty()) {
             webView.evaluateJavascript(filterJs, null)
         }
+        // Issue #9: stop comment reaction chips overlapping the next comment
+        // / "Show previous replies" row.
+        if (layoutFixJs.isNotEmpty()) {
+            webView.evaluateJavascript(layoutFixJs, null)
+        }
+        // Unread Messenger count -> badge on the native Messenger button.
+        if (unreadWatchJs.isNotEmpty()) {
+            webView.evaluateJavascript(unreadWatchJs, null)
+        }
         webView.evaluateJavascript("""
             (function() {
                 if (window.__sb_composer_hooked) return;
@@ -1056,7 +1190,10 @@ class MainActivity : AppCompatActivity() {
             "Remote filter (${if (authorDb.isRemoteFilterEnabled()) "on" else "off"})",
             "View log (${logMessages.size} entries)",
             "Dump DOM",
-            "Re-run filter"
+            "Re-run filter",
+            if (authorDb.isMessengerButtonEnabled()) "Hide Messenger button" else "Show Messenger button",
+            "Reset button/badge positions",
+            if (authorDb.isLiveMessageCheckEnabled()) "Live message check: on" else "Live message check: off"
         )
         AlertDialog.Builder(this)
             .setTitle("SlimBook Debug")
@@ -1071,6 +1208,16 @@ class MainActivity : AppCompatActivity() {
                     6 -> showLog()
                     7 -> webView.evaluateJavascript("window.__slimbook_dump()", null)
                     8 -> injectFilter()
+                    9 -> {
+                        authorDb.setMessengerButtonEnabled(!authorDb.isMessengerButtonEnabled())
+                        updateBadgeVisibility()
+                    }
+                    10 -> {
+                        authorDb.resetOverlayOffsets()
+                        DragHelper.reset(statsBadge)
+                        DragHelper.reset(messengerButton)
+                    }
+                    11 -> authorDb.setLiveMessageCheckEnabled(!authorDb.isLiveMessageCheckEnabled())
                 }
             }
             .show()
@@ -1249,8 +1396,43 @@ class MainActivity : AppCompatActivity() {
         return host.endsWith("facebook.com") || host.endsWith("fbcdn.net") || host.endsWith("fb.com") || host.endsWith("messenger.com")
     }
 
-    @Deprecated("Use OnBackPressedCallback")
-    override fun onBackPressed() {
+    // ---- Back navigation (system back button AND back gesture) ----------
+    //
+    // Registered through OnBackPressedDispatcher instead of the deprecated
+    // onBackPressed() override: this is what the system back gesture /
+    // predictive back dispatches to (and the only thing that still works once
+    // targetSdk is 36). Facebook's single-page app also pushes history
+    // entries that WebView.goBack() "consumes" without changing anything on
+    // screen, which made the gesture look dead inside a post while the
+    // in-page back arrow worked, so every goBack() is verified and falls back
+    // to the in-page back button.
+
+    private val backCallback = object : OnBackPressedCallback(true) {
+        override fun handleOnBackPressed() {
+            handleBack()
+        }
+    }
+
+    private fun setupBackHandling() {
+        onBackPressedDispatcher.addCallback(this, backCallback)
+    }
+
+    private fun isFeedRoot(url: String?): Boolean {
+        if (url == null) return true
+        val path = Uri.parse(url).path ?: ""
+        return path.isEmpty() || path == "/" || path.startsWith("/home")
+    }
+
+    private fun exitApp() {
+        // Disable our callback so the dispatcher runs the system default
+        // (finish / return to launcher), then re-arm it for the next launch
+        // of this activity instance.
+        backCallback.isEnabled = false
+        onBackPressedDispatcher.onBackPressed()
+        backCallback.isEnabled = true
+    }
+
+    private fun handleBack() {
         val url = webView.url ?: ""
         if (isChatUrl(url)) {
             // Leave chat - go back to feed with mobile UA
@@ -1258,11 +1440,58 @@ class MainActivity : AppCompatActivity() {
             messengerRedirectPending = false
             webView.settings.userAgentString = MOBILE_UA
             applyFeedMode()
+            updateBadgeVisibility()
             webView.loadUrl(FB_URL)
-        } else if (webView.canGoBack()) {
-            webView.goBack()
-        } else {
-            super.onBackPressed()
+            return
+        }
+        if (isFeedRoot(url)) {
+            if (webView.canGoBack()) webView.goBack() else exitApp()
+            return
+        }
+        goBackVerified()
+    }
+
+    // Cheap page fingerprint: URL + element count + scroll. If it is unchanged
+    // after goBack(), the back press was swallowed by the SPA.
+    private val pageSignatureJs =
+        "(function(){return location.href+'|'+document.getElementsByTagName('*').length+'|'+Math.round(window.scrollY);})()"
+
+    private fun goBackVerified() {
+        webView.evaluateJavascript(pageSignatureJs) { before ->
+            if (webView.canGoBack()) {
+                webView.goBack()
+            } else {
+                clickPageBackButtonOrExit()
+                return@evaluateJavascript
+            }
+            webView.postDelayed({
+                if (isFinishing || isDestroyed) return@postDelayed
+                webView.evaluateJavascript(pageSignatureJs) { after ->
+                    if (before != null && before == after) {
+                        Log.d("SlimBook", "BACK: goBack() had no visible effect, using page back button")
+                        clickPageBackButtonOrExit()
+                    }
+                }
+            }, 450)
+        }
+    }
+
+    private fun loadFeed() {
+        isMessengerMode = false
+        messengerRedirectPending = false
+        webView.settings.userAgentString = MOBILE_UA
+        applyFeedMode()
+        updateBadgeVisibility()
+        webView.loadUrl(FB_URL)
+    }
+
+    // Facebook often replaces the history entry instead of pushing one, so a
+    // post can have no history to step back through. Back must still go
+    // somewhere: the feed. Only a press made on the feed itself leaves the app.
+    private fun clickPageBackButtonOrExit() {
+        webView.evaluateJavascript(PAGE_BACK_JS) { result ->
+            if (result == "true") return@evaluateJavascript
+            if (!isFeedRoot(webView.url)) loadFeed() else exitApp()
         }
     }
 
@@ -1277,6 +1506,7 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         webView.onResume()
         webView.resumeTimers()
+        setComposerFocused(false)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
