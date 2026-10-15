@@ -1,25 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!--
+      NOTE: android:windowOptOutEdgeToEdgeEnforcement lives in values-v35/,
+      because it requires API 35 while minSdk is 26. See the comment there.
+    -->
     <style name="Theme.SlimBook" parent="Theme.AppCompat.Light.NoActionBar">
         <item name="android:windowFullscreen">false</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
-        <!--
-          Stopgap only. Raising targetSdk to 35 (commit a804357) made Android 15
-          force edge-to-edge, so the WebView is drawn underneath the status bar
-          and the system bar swallows touches in that band: Facebook's own header
-          back arrow and search icon stay visible but become untappable.
-
-          This attribute restores the pre-API-35 behaviour of giving the system
-          bars their own space. It is DEPRECATED and is only honoured up to
-          targetSdk 35 - it will be ignored in a future release, so this is not a
-          long-term fix.
-
-          TODO: replace with real inset handling (fitsSystemWindows on the root
-          FrameLayout, or ViewCompat.setOnApplyWindowInsetsListener applying
-          systemBars() insets), keeping statsBadge and messengerButton inside the
-          inset-safe area so they do not end up under the status bar instead.
-        -->
-        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
     </style>
 </resources>
