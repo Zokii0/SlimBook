@@ -159,6 +159,28 @@ SlimBook is designed to be published via GitHub Releases and F-Droid. To release
    $ANDROID_HOME/build-tools/<ver>/apksigner verify --print-certs /tmp/release.apk # must match AllowedAPKSigningKeys
    ```
 6. **F-Droid Metadata Update (`fdroiddata`):**
+
+   > **Check for an automatic MR first (untested).** The metadata sets
+   > `AutoUpdateMode: Version` with `UpdateCheckMode: Tags`, which is supposed to
+   > let the `checkupdates-bot` detect a new tag and open a metadata MR by itself —
+   > see `fdroid/fdroiddata` MRs authored by `checkupdates-bot`.
+   >
+   > **In practice this has not fired for SlimBook.** Across `v1.2.0` and `v1.2.1`
+   > no bot MR appeared, while the bot was actively opening them for other apps
+   > (100+ in a single month, including this author's ClayModeller and ONVIF
+   > Camera). The only SlimBook bot MR ever raised was `!50330` for 1.1.0, which
+   > was closed because a manual MR (`!50827`) superseded it. **Cause unknown** —
+   > SlimBook is the only one of these apps with a `Binaries:` line, so that
+   > interaction is a plausible candidate, but it has not been confirmed.
+   >
+   > So: **look** for a bot MR before authoring one by hand, but do not wait for
+   > it. If one appears and its `commit:` matches the tag, merge the bot's instead
+   > of writing your own — that's less work and is the intended workflow.
+   >
+   > Worth revisiting: if the bot ever does fire reliably, this whole manual step
+   > (and the reproducibility-verification constraints that come with `Binaries:`)
+   > could be dropped for routine releases.
+
    Since SlimBook uses prebuilt binaries (`Binaries:`), each new release requires updating the F-Droid metadata repository (`fdroiddata`).
    The `commit:` for the new build must be the commit the release tag points at — confirm with `git rev-list -n1 v<version>` rather than assuming it is the bump commit, as it may include later commits such as changelog additions.
    - **Update local `fdroiddata` repository from upstream:**
