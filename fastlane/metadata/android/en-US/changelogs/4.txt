@@ -1,0 +1,6 @@
+• Fixed: header back arrow and search icon were unresponsive on Android 15
+
+Facebook's page header was being drawn underneath the system status bar, so
+taps on the back arrow and search icon were going to the system bar instead of
+the page. This affected Android 15 devices after the previous release. The page
+header now sits below the status bar and its controls are tappable again.

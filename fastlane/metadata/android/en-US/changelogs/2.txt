@@ -1,0 +1,3 @@
+• Fix Message tab first click and cut-off chat list
+• Toggle stats badge visibility in Messenger mode
+• Detect Facebook's "install the app" wall in chat and adjust layout
