@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!--
+      NOTE: android:windowOptOutEdgeToEdgeEnforcement lives in values-v35/,
+      because it requires API 35 while minSdk is 26. See the comment there.
+    -->
     <style name="Theme.SlimBook" parent="Theme.AppCompat.Light.NoActionBar">
         <item name="android:windowFullscreen">false</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
