@@ -142,15 +142,25 @@ To update filter rules without releasing a new APK:
 
 SlimBook is designed to be published via GitHub Releases and F-Droid. To release a new version:
 
-1. **Update version code and version name** in `app/build.gradle.kts` (increment `versionCode`, update `versionName`).
-2. **Commit and push** changes to `main`.
-3. **Create a GitHub Release / Tag:**
+1. **Write the Fastlane changelog first.** Add `fastlane/metadata/android/en-US/changelogs/<versionCode>.txt`, where `<versionCode>` is the **new** version code you are about to set, not the version name. F-Droid reads this file from the **tagged commit**, so it must be committed and pushed *before* the tag is created — otherwise the release ships with no release notes and the only way to fix it is to move the tag (see "Do not move a published tag" below).
+2. **Update version code and version name** in `app/build.gradle.kts` (increment `versionCode`, update `versionName`).
+3. **Commit and push** changes to `main`.
+4. **Create a GitHub Release / Tag:**
    - Go to your repository on GitHub → **Releases** → **Draft a new release**.
-   - Create a new tag matching the version (e.g., `v1.2.0`).
+   - Create a new tag matching the version (e.g., `v1.2.1`).
    - Write release notes and publish the release.
    - *GitHub Actions will automatically build, sign using repository keystore secrets (`KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`), and attach `app-release.apk` to the release.*
-4. **F-Droid Metadata Update (`fdroiddata`):**
+   - **Check the Actions run went green** before moving on — the `release` job only runs if `build`, `lint` and `test` all pass, and a missing signing secret fails *after* the release is public.
+5. **Verify the attached APK** before telling anyone the release is done:
+   ```bash
+   curl -sL -o /tmp/release.apk \
+     https://github.com/mretallack/SlimBook/releases/download/v<version>/app-release.apk
+   $ANDROID_HOME/build-tools/<ver>/aapt2 dump badging /tmp/release.apk | head -1   # versionCode/versionName
+   $ANDROID_HOME/build-tools/<ver>/apksigner verify --print-certs /tmp/release.apk # must match AllowedAPKSigningKeys
+   ```
+6. **F-Droid Metadata Update (`fdroiddata`):**
    Since SlimBook uses prebuilt binaries (`Binaries:`), each new release requires updating the F-Droid metadata repository (`fdroiddata`).
+   The `commit:` for the new build must be the commit the release tag points at — confirm with `git rev-list -n1 v<version>` rather than assuming it is the bump commit, as it may include later commits such as changelog additions.
    - **Update local `fdroiddata` repository from upstream:**
      ```bash
      cd ../fdroiddata
@@ -160,21 +170,52 @@ SlimBook is designed to be published via GitHub Releases and F-Droid. To release
      ```
    - **Create a working branch:**
      ```bash
-     git checkout -b update-slimbook-v1.2.0
+     git checkout -b update-slimbook-v1.2.1
      ```
    - **Edit metadata file (`metadata/uk.org.retallack.slimbook.yml`):**
      Add the new version entry under `Builds:` with its corresponding release tag commit hash, and update `CurrentVersion` / `CurrentVersionCode`.
    - **Run F-Droid linter / rewritemeta:**
+     `fdroid rewritemeta` and `fdroid lint` take the **app id**, not the file path:
      ```bash
-     fdroid rewritemeta metadata/uk.org.retallack.slimbook.yml
+     fdroid rewritemeta uk.org.retallack.slimbook
+     fdroid lint uk.org.retallack.slimbook
      ```
    - **Commit and push:**
      ```bash
      git add metadata/uk.org.retallack.slimbook.yml
-     git commit -m "SlimBook: update to v1.2.0"
-     git push -u origin update-slimbook-v1.2.0
+     git commit -m "SlimBook: update to v1.2.1"
+     git push -u origin update-slimbook-v1.2.1
      ```
-   - Open a Merge Request on GitLab against `fdroid/fdroiddata`.
+   - Open a Merge Request on GitLab against `fdroid/fdroiddata`. If a previous MR for the same app is still open, open the new one as a **Draft** until the release is final, so nothing is built from a tag you may still change.
+
+### Do not move a published tag
+
+Deleting a tag that a published GitHub Release points at **detaches the release and silently converts it back to a draft**, at an `untagged-…` URL. It is not visible in the Releases list as published any more, and the workflow is not re-triggered. Recovering means deleting the orphaned draft and creating the release again from scratch.
+
+Tags are effectively immutable once released. If something is wrong with a release, prefer a new patch version (e.g. `v1.2.2`) over moving the existing tag:
+
+- Moving the tag produces a **different APK** (non-reproducible builds), so any verification already done no longer applies to the artifact being shipped.
+- F-Droid may already have fetched the old asset against the recorded commit, creating a mismatch between the metadata `commit:` and the tag.
+- Reinstalling a differently-signed-but-same-key APK is fine with `adb install -r`, but the artefact you tested is no longer the artefact you ship.
+
+The only exception is a **draft** F-Droid MR where no build has run yet, and a GitHub release you are willing to delete and recreate.
+
+### Version code and Fastlane changelogs
+
+`versionCode` must increase by one for every release and is what Fastlane uses for changelog filenames. Keep them in step:
+
+| `versionCode` | changelog file |
+|---|---|
+| 1 | `changelogs/1.txt` |
+| 4 | `changelogs/4.txt` |
+
+A missing file means that version shows no release notes on F-Droid. Gaps are harmless but pointless — check the `changelogs/` directory covers every version before tagging.
+
+### Debug vs release builds on a device
+
+The release APK is signed with the release keystore; local `assembleDebug` builds are not. Installing one over the other fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`, and the only fix is to uninstall first — which wipes app data including the WebView cookie store, i.e. the user's Facebook login.
+
+`adb install -r` succeeds only when the signing key is unchanged, so **release → release** updates are safe and preserve the session. Prefer keeping a release build on test devices.
 
 ## License
 
